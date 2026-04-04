@@ -60,7 +60,8 @@ export class VoicevoxClient {
     } catch (error) {
       if (
         error instanceof TypeError &&
-        String(error.message).includes('ECONNREFUSED')
+        (error as TypeError & { cause?: { code?: string } }).cause?.code ===
+          'ECONNREFUSED'
       ) {
         throw new Error(
           'VOICEVOXエンジンに接続できません。VOICEVOXが起動しているか確認してください。'
@@ -146,7 +147,8 @@ export class VoicevoxClient {
     } catch (error) {
       if (
         error instanceof TypeError &&
-        String(error.message).includes('ECONNREFUSED')
+        (error as TypeError & { cause?: { code?: string } }).cause?.code ===
+          'ECONNREFUSED'
       ) {
         throw new Error(
           'VOICEVOXエンジンに接続できません。VOICEVOXが起動しているか確認してください。'
