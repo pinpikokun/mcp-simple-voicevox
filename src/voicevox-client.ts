@@ -1,4 +1,7 @@
-import axios, { AxiosInstance } from 'axios';
+import { spawn } from 'child_process';
+import { writeFileSync, unlinkSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 export interface SpeakOptions {
   text: string;
@@ -7,14 +10,7 @@ export interface SpeakOptions {
 }
 
 export class VoicevoxClient {
-  private client: AxiosInstance;
-
-  constructor(private endpoint: string) {
-    this.client = axios.create({
-      baseURL: endpoint,
-      timeout: 30000,
-    });
-  }
+  constructor(private endpoint: string) {}
 
   async speak(
     text: string,
@@ -23,43 +19,51 @@ export class VoicevoxClient {
   ): Promise<void> {
     try {
       // 音声クエリの作成
-      const queryResponse = await this.client.post('/audio_query', null, {
-        params: {
-          text,
-          speaker,
-        },
-      });
+      const queryResponse = await fetch(
+        `${this.endpoint}/audio_query?${new URLSearchParams({ text, speaker: String(speaker) })}`,
+        { method: 'POST' }
+      );
 
-      const audioQuery = queryResponse.data;
+      if (!queryResponse.ok) {
+        throw new Error(
+          `VOICEVOX APIエラー: ${queryResponse.status} ${queryResponse.statusText}`
+        );
+      }
 
-      // 速度スケールが指定されている場合は設定
+      const audioQuery = (await queryResponse.json()) as Record<
+        string,
+        unknown
+      >;
+
       if (speedScale !== undefined) {
         audioQuery.speedScale = speedScale;
       }
 
       // 音声合成
-      const synthesisResponse = await this.client.post(
-        '/synthesis',
-        audioQuery,
+      const synthesisResponse = await fetch(
+        `${this.endpoint}/synthesis?${new URLSearchParams({ speaker: String(speaker) })}`,
         {
-          params: {
-            speaker,
-          },
-          responseType: 'arraybuffer',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(audioQuery),
         }
       );
 
-      // 音声データの再生（一時的に音声ファイルとして保存して再生）
-      await this.playAudio(synthesisResponse.data);
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        if (error.code === 'ECONNREFUSED') {
-          throw new Error(
-            'VOICEVOXエンジンに接続できません。VOICEVOXが起動しているか確認してください。'
-          );
-        }
+      if (!synthesisResponse.ok) {
         throw new Error(
-          `VOICEVOX APIエラー: ${error.response?.status} ${error.response?.statusText}`
+          `VOICEVOX APIエラー: ${synthesisResponse.status} ${synthesisResponse.statusText}`
+        );
+      }
+
+      const audioData = await synthesisResponse.arrayBuffer();
+      await this.playAudio(audioData);
+    } catch (error) {
+      if (
+        error instanceof TypeError &&
+        String(error.message).includes('ECONNREFUSED')
+      ) {
+        throw new Error(
+          'VOICEVOXエンジンに接続できません。VOICEVOXが起動しているか確認してください。'
         );
       }
       throw error;
@@ -67,23 +71,16 @@ export class VoicevoxClient {
   }
 
   private async playAudio(audioData: ArrayBuffer): Promise<void> {
-    const fs = await import('fs');
-    const path = await import('path');
-    const { spawn } = await import('child_process');
-    const os = await import('os');
-
     return new Promise((resolve, reject) => {
-      const tempFilePath = path.join(os.tmpdir(), `voicevox_${Date.now()}.wav`);
+      const tempFilePath = join(tmpdir(), `voicevox_${Date.now()}.wav`);
 
-      // 音声データを一時ファイルに保存
-      fs.writeFileSync(tempFilePath, Buffer.from(audioData));
+      writeFileSync(tempFilePath, Buffer.from(audioData));
 
-      // プラットフォームに応じた再生コマンドを選択
       let command: string;
       let args: string[];
 
       switch (process.platform) {
-        case 'darwin': // macOS
+        case 'darwin':
           command = 'afplay';
           args = [tempFilePath];
           break;
@@ -91,7 +88,7 @@ export class VoicevoxClient {
           command = 'aplay';
           args = [tempFilePath];
           break;
-        case 'win32': // Windows
+        case 'win32':
           command = 'powershell';
           args = [
             '-c',
@@ -99,7 +96,7 @@ export class VoicevoxClient {
           ];
           break;
         default:
-          fs.unlinkSync(tempFilePath);
+          unlinkSync(tempFilePath);
           reject(
             new Error(
               `サポートされていないプラットフォーム: ${process.platform}`
@@ -111,9 +108,8 @@ export class VoicevoxClient {
       const player = spawn(command, args);
 
       player.on('close', (code) => {
-        // 一時ファイルを削除
         try {
-          fs.unlinkSync(tempFilePath);
+          unlinkSync(tempFilePath);
         } catch (e) {
           console.error('一時ファイルの削除に失敗:', e);
         }
@@ -126,9 +122,8 @@ export class VoicevoxClient {
       });
 
       player.on('error', (error) => {
-        // 一時ファイルを削除
         try {
-          fs.unlinkSync(tempFilePath);
+          unlinkSync(tempFilePath);
         } catch (e) {
           console.error('一時ファイルの削除に失敗:', e);
         }
@@ -139,17 +134,22 @@ export class VoicevoxClient {
 
   async getSpeakers(): Promise<unknown[]> {
     try {
-      const response = await this.client.get('/speakers');
-      return response.data;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        if (error.code === 'ECONNREFUSED') {
-          throw new Error(
-            'VOICEVOXエンジンに接続できません。VOICEVOXが起動しているか確認してください。'
-          );
-        }
+      const response = await fetch(`${this.endpoint}/speakers`);
+
+      if (!response.ok) {
         throw new Error(
-          `VOICEVOX APIエラー: ${error.response?.status} ${error.response?.statusText}`
+          `VOICEVOX APIエラー: ${response.status} ${response.statusText}`
+        );
+      }
+
+      return response.json() as Promise<unknown[]>;
+    } catch (error) {
+      if (
+        error instanceof TypeError &&
+        String(error.message).includes('ECONNREFUSED')
+      ) {
+        throw new Error(
+          'VOICEVOXエンジンに接続できません。VOICEVOXが起動しているか確認してください。'
         );
       }
       throw error;
